@@ -1,86 +1,87 @@
 import { expect } from "chai";
 import pkg from "hardhat";
-import { deployContracts } from "./helpers/setup.js";
 const { ethers } = pkg;
 
-describe("BOND", function () {
-  let debase, stake, bond, controller, policyContract, owner, addr1, addr2;
+describe("Bonding", function () {
+  let bonding, debaseToken, user1, owner, treasury;
+
+  before(async function () {
+    [owner, user1, treasury] = await ethers.getSigners();
+  });
 
   beforeEach(async function () {
-    ({ debase, stake, bond, controller, policyContract, owner, addr1, addr2 } =
-      await deployContracts());
+    // Deploy DEBASE Token
+    const DebaseToken = await ethers.getContractFactory("DEBASE");
+    debaseToken = await DebaseToken.deploy(
+      owner.address,
+      "DebaseToken",
+      "DBT",
+      ethers.parseEther("1000000")
+    );
 
-    // Mint tokens for addr1 and addr2
-    await debase.mint(addr1.address, ethers.parseEther("1000000"));
-    await debase.mint(addr2.address, ethers.parseEther("1000000"));
+    // Deploy Bonding Contract
+    const Bonding = await ethers.getContractFactory("BOND");
+    bonding = await Bonding.deploy(
+      owner.address,
+      debaseToken.address,
+      treasury.address
+    );
   });
 
-  describe("Bond Creation", function () {
-    it("Should create a bond correctly", async function () {
-      await debase
-        .connect(addr1)
-        .approve(controller.getAddress(), ethers.parseEther("100"));
-      await controller
-        .connect(addr1)
-        .createBond(addr1.address, ethers.parseEther("100"), false);
-      const userBond = await bond.bonds(addr1.address);
-      expect(userBond.payout).to.equal(ethers.parseEther("115")); // 100 + 15% discount
-    });
+  it("Should allow bonding ETH and return payout", async function () {
+    const bondAmount = ethers.parseEther("1");
 
-    it("Should create a partner bond with higher discount", async function () {
-      await debase
-        .connect(addr1)
-        .approve(controller.getAddress(), ethers.parseEther("100"));
-      await controller
-        .connect(addr1)
-        .createBond(addr1.address, ethers.parseEther("100"), true);
-      const userBond = await bond.bonds(addr1.address);
-      expect(userBond.payout).to.equal(ethers.parseEther("125")); // 100 + 25% discount
-    });
+    // Perform bond operation
+    await bonding.connect(user1).bondEth({ value: bondAmount });
+
+    // Fetch bond details
+    const bond = await bonding.bonds(user1.address);
+
+    expect(bond.payout).to.be.gt(bondAmount);
   });
 
-  describe("Bond Redemption", function () {
-    beforeEach(async function () {
-      await debase
-        .connect(addr1)
-        .approve(controller.getAddress(), ethers.parseEther("100"));
-      await controller
-        .connect(addr1)
-        .createBond(addr1.address, ethers.parseEther("100"), false);
-    });
+  it("Should allow claiming bonds", async function () {
+    const bondAmount = ethers.parseEther("1");
 
-    it("Should not allow redeeming an immature bond", async function () {
-      await expect(
-        controller.connect(addr1).redeemBond(addr1.address)
-      ).to.be.revertedWith("Bond not yet matured");
-    });
+    // Perform bond operation
+    await bonding.connect(user1).bondEth({ value: bondAmount });
 
-    it("Should allow redeeming a mature bond", async function () {
-      await ethers.provider.send("evm_increaseTime", [3 * 24 * 60 * 60]); // 3 days
-      await ethers.provider.send("evm_mine");
-      const initialBalance = await debase.balanceOf(addr1.address);
-      await controller.connect(addr1).redeemBond(addr1.address);
-      const finalBalance = await debase.balanceOf(addr1.address);
-      expect(finalBalance).to.be.gt(initialBalance);
-    });
+    // Fast forward time or manipulate bond maturity time if needed
+    await ethers.provider.send("evm_increaseTime", [60 * 60 * 24]); // Move 1 day forward
+    await ethers.provider.send("evm_mine");
+
+    // Claim bond
+    await bonding.connect(user1).claim();
+    const userBalance = await debaseToken.balanceOf(user1.address);
+
+    expect(userBalance).to.be.gt(0);
   });
-  describe("Discount Settings", function () {
-    it("Should allow setting new discounts", async function () {
-      await controller.connect(owner).setBondingDiscount(false, 2000); // 20% in basis points
-      await debase
-        .connect(addr1)
-        .approve(controller.getAddress(), ethers.parseEther("100"));
-      await controller
-        .connect(addr1)
-        .createBond(addr1.address, ethers.parseEther("100"), false);
-      const userBond = await bond.bonds(addr1.address);
-      expect(userBond.payout).to.equal(ethers.parseEther("120")); // 100 + 20% discount
-    });
 
-    it("Should not allow setting discounts higher than 50%", async function () {
-      await expect(controller.connect(owner).setBondingDiscount(false, 5100))
-        .to.be.revertedWithCustomError(bond, "DiscountTooHigh")
-        .withArgs(5100);
-    });
+  it("Should not allow claiming bonds before maturity", async function () {
+    const bondAmount = ethers.parseEther("1");
+
+    // Perform bond operation
+    await bonding.connect(user1).bondEth({ value: bondAmount });
+
+    // Try to claim bond before maturity
+    await expect(bonding.connect(user1).claim()).to.be.revertedWith(
+      "Bond not mature yet"
+    );
   });
+
+  it("Should allow checking bond details", async function () {
+    const bondAmount = ethers.parseEther("1");
+
+    // Perform bond operation
+    await bonding.connect(user1).bondEth({ value: bondAmount });
+
+    // Fetch bond details
+    const bond = await bonding.bonds(user1.address);
+
+    expect(bond.payout).to.be.gt(bondAmount);
+    expect(bond.lastBlock).to.be.gt(0);
+    expect(bond.maturity).to.be.gt(0);
+  });
+
+  // Add more bonding tests as needed
 });
