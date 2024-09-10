@@ -41,6 +41,6 @@ contract DEBASE is Module {
     }
 
     function KEYCODE() public pure override returns (Keycode) {
-        return toKeycode("DEBASE");
+        return toKeycode("DBASE");  // Return the module keycode
     }
 }

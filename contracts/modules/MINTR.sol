@@ -22,7 +22,7 @@ contract MINTR is Module {
 
     // =========  STATE ========= //
 
-    YieldFu public yieldFu;  // Reference to the YieldFu token
+    YieldFuToken public yieldFu;  // Reference to the YieldFu token
     bool public active;     // Status of the module (active/inactive)
 
     /// @notice Mapping of who is approved for minting.
@@ -30,7 +30,7 @@ contract MINTR is Module {
 
     address public constant BLACK_HOLE = 0x000000000000000000000000000000000000dEaD;
 
-    constructor(Kernel kernel_, YieldFu yieldFu_) Module(kernel_) {
+    constructor(Kernel kernel_, YieldFuToken yieldFu_) Module(kernel_) {
         yieldFu = yieldFu_;
         active = true;
     }
@@ -49,6 +49,7 @@ contract MINTR is Module {
         yieldFu.mint(to_, amount_); // Mint YieldFu tokens to the address
         emit Mint(msg.sender, to_, amount_);
     }
+
 
     /// @notice Burn YieldFu tokens by sending them to a black hole address.
     function burn(address from_, uint256 amount_) external onlyWhileActive permissioned {

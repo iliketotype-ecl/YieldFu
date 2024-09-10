@@ -5,6 +5,7 @@ import "./DEBASE.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "../Kernel.sol";
+import "./MINTR.sol";  // Import the MINTR contract
 
 contract BOND is Module, ReentrancyGuard {
     // =========  EVENTS ========= //
@@ -18,8 +19,9 @@ contract BOND is Module, ReentrancyGuard {
     error BOND_AlreadyClaimed();
 
     // =========  STATE ========= //
-    DEBASE public token;
+    YieldFuToken public token;
     address public treasury;
+    MINTR public mintrModule;  // Add a reference to the MINTR contract
     uint256 public ethDiscount = 150; // 15% represented as 150
     uint256 public partnerDiscount = 250; // 25% represented as 250
     uint256 public constant BOND_MATURITY = 3 days;
@@ -32,9 +34,10 @@ contract BOND is Module, ReentrancyGuard {
 
     mapping(address => BondInfo) public bonds;
 
-    constructor(Kernel kernel_, address token_, address treasury_) Module(kernel_) {
-        token = DEBASE(token_);
+    constructor(Kernel kernel_, address token_, address treasury_, MINTR mintrModule_) Module(kernel_) {
+        token = YieldFuToken(token_);
         treasury = treasury_;
+        mintrModule = mintrModule_;  // Initialize the MINTR module
     }
 
     function KEYCODE() public pure override returns (Keycode) {
@@ -70,7 +73,7 @@ contract BOND is Module, ReentrancyGuard {
         if (bond.claimed) revert BOND_AlreadyClaimed();
 
         bond.claimed = true;
-        token.transfer(msg.sender, bond.payout);
+        mintrModule.mint(msg.sender, bond.payout); // Mint discounted tokens from the MINTR module
         emit BondClaimed(msg.sender, bond.payout);
     }
 

@@ -16,7 +16,7 @@ contract STAKE is Module {
     error STAKE_InsufficientBalance();
 
     // =========  STATE ========= //
-    DEBASE public token;
+    YieldFuToken public token;
     uint256 public constant BASE_APY = 1333; // 1333% APY
     uint256 public constant BOOSTED_APY = 8888; // 8888% APY
     uint256 public currentAPY;
@@ -26,7 +26,7 @@ contract STAKE is Module {
     mapping(address => uint256) public lastUpdateTime;
 
     constructor(Kernel kernel_, address token_) Module(kernel_) {
-        token = DEBASE(token_);
+        token = YieldFuToken(token_);
         currentAPY = BASE_APY;
     }
 
@@ -53,6 +53,7 @@ contract STAKE is Module {
         emit Stake(msg.sender, amount);
     }
 
+
     function unstake(uint256 amount) external permissioned {
         if (amount == 0) revert STAKE_ZeroAmount();
         if (stakedBalance[msg.sender] < amount) revert STAKE_InsufficientBalance();
@@ -69,7 +70,7 @@ contract STAKE is Module {
         uint256 reward = calculateReward(msg.sender);
         if (reward > 0) {
             lastUpdateTime[msg.sender] = block.timestamp;
-            token.transfer(msg.sender, reward);
+            token.transfer(msg.sender, reward); // Transfer YieldFu as staking reward
             emit RewardPaid(msg.sender, reward);
         }
     }
