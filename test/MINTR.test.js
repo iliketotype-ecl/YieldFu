@@ -2,50 +2,27 @@ import { expect } from "chai";
 import pkg from "hardhat";
 const { ethers } = pkg;
 
-describe("MINTR", function () {
-  let mintr, debaseToken, policy, user1, owner;
+describe("Minting", function () {
+  it("Should allow addresses with MINTER_ROLE to mint tokens", async function () {
+    const mintAmount = ethers.parseEther("1000");
 
-  before(async function () {
-    [owner, policy, user1] = await ethers.getSigners();
+    // Mint new tokens from minter to user1
+    await yieldFuToken.connect(minter).mint(user1.address, mintAmount);
+
+    // Check the balance of user1 after minting
+    expect(await yieldFuToken.balanceOf(user1.address)).to.equal(mintAmount);
+
+    // Check the total supply after minting
+    const totalSupply = ethers.parseEther("1000000").add(mintAmount);
+    expect(await yieldFuToken.totalSupply()).to.equal(totalSupply);
   });
 
-  beforeEach(async function () {
-    // Deploy DEBASE Token
-    const DebaseToken = await ethers.getContractFactory("DEBASE");
-    debaseToken = await DebaseToken.deploy(
-      owner.address,
-      "DebaseToken",
-      "DBT",
-      ethers.parseEther("1000000")
-    );
+  it("Should not allow addresses without MINTER_ROLE to mint tokens", async function () {
+    const mintAmount = ethers.parseEther("1000");
 
-    // Deploy MINTR Contract
-    const Mintr = await ethers.getContractFactory("MINTR");
-    mintr = await Mintr.deploy(debaseToken.address);
+    // Try to mint from an address without MINTER_ROLE (burner in this case)
+    await expect(
+      yieldFuToken.connect(burner).mint(user1.address, mintAmount)
+    ).to.be.revertedWith("AccessControl: account"); // reverts with AccessControl error
   });
-
-  it("Should allow minting tokens", async function () {
-    const mintAmount = ethers.parseEther("100");
-
-    await mintr.increaseMintApproval(policy.address, mintAmount);
-    await mintr.connect(policy).mint(user1.address, mintAmount);
-
-    expect(await debaseToken.balanceOf(user1.address)).to.equal(mintAmount);
-  });
-
-  it("Should allow burning tokens", async function () {
-    const mintAmount = ethers.parseEther("100");
-    const burnAmount = ethers.parseEther("50");
-
-    await mintr.increaseMintApproval(policy.address, mintAmount);
-    await mintr.connect(policy).mint(user1.address, mintAmount);
-
-    await mintr.connect(policy).burn(user1.address, burnAmount);
-
-    expect(await debaseToken.balanceOf(user1.address)).to.equal(
-      ethers.parseEther("50")
-    );
-  });
-
-  // Add more MINTR related tests here
 });

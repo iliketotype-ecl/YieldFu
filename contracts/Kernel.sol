@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 pragma solidity 0.8.24;
 
+import "@openzeppelin/contracts/access/extensions/AccessControlEnumerable.sol";
+
 //============================================================================================//
 //                                        GLOBAL TYPES                                        //
 //============================================================================================//
@@ -11,7 +13,8 @@ enum Actions {
     ActivatePolicy,
     DeactivatePolicy,
     ChangeExecutor,
-    MigrateKernel
+    MigrateKernel,
+    ExecuteAction  
 }
 
 struct Instruction {
@@ -116,7 +119,7 @@ abstract contract Policy is KernelAdapter {
     function requestPermissions() external view virtual returns (Permissions[] memory requests) {}
 }
 
-contract Kernel {
+contract Kernel is AccessControl {
     event PermissionsUpdated(
         Keycode indexed keycode_,
         Policy indexed policy_,
@@ -124,7 +127,9 @@ contract Kernel {
         bool granted_
     );
     event ActionExecuted(Actions indexed action_, address indexed target_);
+    event ModuleFunctionExecuted(address indexed module, bytes4 indexed functionSelector);
 
+    error Kernel_ModuleFunctionReverted(address module, bytes reason);
     error Kernel_OnlyExecutor(address caller_);
     error Kernel_ModuleAlreadyInstalled(Keycode module_);
     error Kernel_InvalidModuleUpgrade(Keycode module_);
@@ -143,6 +148,7 @@ contract Kernel {
 
     constructor() {
         executor = msg.sender;
+        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender); // Granting the deployer DEFAULT_ADMIN_ROLE
     }
 
     modifier onlyExecutor() {
@@ -154,33 +160,55 @@ contract Kernel {
         return activePolicies.length > 0 && activePolicies[getPolicyIndex[policy_]] == policy_;
     }
 
-    function executeAction(Actions action_, address target_) external onlyExecutor {
+    // Reentrancy guard
+    uint256 private constant _NOT_ENTERED = 1;
+    uint256 private constant _ENTERED = 2;
+    uint256 private _status;
+
+    modifier nonReentrant() {
+        require(_status != _ENTERED, "ReentrancyGuard: reentrant call");
+        _status = _ENTERED;
+        _;
+        _status = _NOT_ENTERED;
+    }
+
+    // Execute Actions
+    function executeAction(
+        Actions action_,
+        address target_,
+        bytes memory data_
+    ) external onlyExecutor nonReentrant {
+        ensureContract(target_);
+
         if (action_ == Actions.InstallModule) {
-            ensureContract(target_);
             ensureValidKeycode(Module(target_).KEYCODE());
             _installModule(Module(target_));
         } else if (action_ == Actions.UpgradeModule) {
-            ensureContract(target_);
             ensureValidKeycode(Module(target_).KEYCODE());
             _upgradeModule(Module(target_));
         } else if (action_ == Actions.ActivatePolicy) {
-            ensureContract(target_);
             _activatePolicy(Policy(target_));
         } else if (action_ == Actions.DeactivatePolicy) {
-            ensureContract(target_);
             _deactivatePolicy(Policy(target_));
         } else if (action_ == Actions.ChangeExecutor) {
+            require(target_ != address(0), "Kernel: invalid executor address");
             executor = target_;
         } else if (action_ == Actions.MigrateKernel) {
-            ensureContract(target_);
+            require(target_ != address(this), "Kernel: cannot migrate to self");
             _migrateKernel(Kernel(target_));
+        } else if (action_ == Actions.ExecuteAction) {
+            _executeModuleFunction(target_, data_);
+        } else {
+            revert("Kernel: invalid action");
         }
 
         emit ActionExecuted(action_, target_);
     }
 
+    // Installation of modules
     function _installModule(Module newModule_) internal {
         Keycode keycode = newModule_.KEYCODE();
+        require(Keycode.unwrap(keycode) != bytes5(0), "Kernel: invalid keycode");
 
         if (address(getModuleForKeycode[keycode]) != address(0))
             revert Kernel_ModuleAlreadyInstalled(keycode);
@@ -190,26 +218,9 @@ contract Kernel {
         allKeycodes.push(keycode);
 
         newModule_.INIT();
-        
     }
 
-
-    function _upgradeModule(Module newModule_) internal {
-        Keycode keycode = newModule_.KEYCODE();
-        Module oldModule = getModuleForKeycode[keycode];
-
-        if (address(oldModule) == address(0) || oldModule == newModule_)
-            revert Kernel_InvalidModuleUpgrade(keycode);
-
-        getKeycodeForModule[oldModule] = Keycode.wrap(bytes5(0));
-        getKeycodeForModule[newModule_] = keycode;
-        getModuleForKeycode[keycode] = newModule_;
-
-        newModule_.INIT();
-
-        _reconfigurePolicies(keycode);
-    }
-
+    // Policy activation
     function _activatePolicy(Policy policy_) internal {
         if (isPolicyActive(policy_)) revert Kernel_PolicyAlreadyActivated(address(policy_));
 
@@ -217,23 +228,15 @@ contract Kernel {
         getPolicyIndex[policy_] = activePolicies.length - 1;
 
         Keycode[] memory dependencies = policy_.configureDependencies();
-        uint256 depLength = dependencies.length;
-
-        for (uint256 i; i < depLength; ) {
-            Keycode keycode = dependencies[i];
-
-            moduleDependents[keycode].push(policy_);
-            getDependentIndex[keycode][policy_] = moduleDependents[keycode].length - 1;
-
-            unchecked {
-                ++i;
-            }
+        for (uint256 i = 0; i < dependencies.length; ++i) {
+            moduleDependents[dependencies[i]].push(policy_);
         }
 
         Permissions[] memory requests = policy_.requestPermissions();
         _setPolicyPermissions(policy_, requests, true);
     }
 
+    // Policy deactivation
     function _deactivatePolicy(Policy policy_) internal {
         if (!isPolicyActive(policy_)) revert Kernel_PolicyNotActivated(address(policy_));
 
@@ -249,39 +252,6 @@ contract Kernel {
         delete getPolicyIndex[policy_];
 
         _pruneFromDependents(policy_);
-    }
-
-    function _migrateKernel(Kernel newKernel_) internal {
-        uint256 keycodeLen = allKeycodes.length;
-        for (uint256 i; i < keycodeLen; ) {
-            Module module = Module(getModuleForKeycode[allKeycodes[i]]);
-            module.changeKernel(newKernel_);
-            unchecked {
-                ++i;
-            }
-        }
-
-        uint256 policiesLen = activePolicies.length;
-        for (uint256 j; j < policiesLen; ) {
-            Policy policy = activePolicies[j];
-            policy.changeKernel(newKernel_);
-            unchecked {
-                ++j;
-            }
-        }
-    }
-
-    function _reconfigurePolicies(Keycode keycode_) internal {
-        Policy[] memory dependents = moduleDependents[keycode_];
-        uint256 depLength = dependents.length;
-
-        for (uint256 i; i < depLength; ) {
-            dependents[i].configureDependencies();
-
-            unchecked {
-                ++i;
-            }
-        }
     }
 
     function _setPolicyPermissions(
@@ -301,6 +271,99 @@ contract Kernel {
             }
         }
     }
+
+    function _executeModuleFunction(address module_, bytes memory data_) internal {
+        (bool success, bytes memory result) = module_.call(data_);
+        if (!success) {
+            revert Kernel_ModuleFunctionReverted(module_, result);
+        }
+        emit ModuleFunctionExecuted(module_, bytes4(data_));
+    }
+
+
+    function _upgradeModule(Module newModule_) internal {
+        Keycode keycode = newModule_.KEYCODE();
+        Module oldModule = getModuleForKeycode[keycode];
+
+        // Ensure the module being upgraded already exists and that it's not the same as the new module
+        if (address(oldModule) == address(0) || oldModule == newModule_)
+            revert Kernel_InvalidModuleUpgrade(keycode);
+
+        // Remove the old module and install the new one
+        getKeycodeForModule[oldModule] = Keycode.wrap(bytes5(0));
+        getKeycodeForModule[newModule_] = keycode;
+        getModuleForKeycode[keycode] = newModule_;
+
+        // Initialize the new module
+        newModule_.INIT();
+
+        // Reconfigure the policies that depend on the upgraded module
+        _reconfigurePolicies(keycode);
+    }
+
+    function _reconfigurePolicies(Keycode keycode_) internal {
+        Policy[] memory dependents = moduleDependents[keycode_];
+        uint256 depLength = dependents.length;
+
+        for (uint256 i; i < depLength; ) {
+            dependents[i].configureDependencies();
+
+            unchecked {
+                ++i;
+            }
+        }
+    }
+
+
+    function _migrateKernel(Kernel newKernel_) internal {
+        require(address(newKernel_) != address(0), "Kernel: invalid new kernel address");
+
+        // Transfer all modules to the new kernel
+        for (uint256 i = 0; i < allKeycodes.length; i++) {
+            Module module = Module(getModuleForKeycode[allKeycodes[i]]);
+            module.changeKernel(newKernel_);
+        }
+
+        // Transfer all policies to the new kernel
+        for (uint256 j = 0; j < activePolicies.length; j++) {
+            Policy policy = activePolicies[j];
+            policy.changeKernel(newKernel_);
+        }
+
+        // Transfer ownership of modules and policies to the new kernel
+        newKernel_.acceptMigration(allKeycodes, activePolicies);
+    }
+
+    function setModulePermission(
+        address module,
+        address policy,
+        bytes4 selector,
+        bool granted
+    ) external onlyExecutor {
+        Keycode keycode = getKeycodeForModule[Module(module)];
+        modulePermissions[keycode][Policy(policy)][selector] = granted;
+        emit PermissionsUpdated(keycode, Policy(policy), selector, granted);
+    }
+
+
+    function acceptMigration(Keycode[] memory keycodes_, Policy[] memory policies_) external {
+        require(msg.sender == executor, "Kernel: only executor can accept migration");
+
+        // Process the incoming migration by registering the modules and policies
+        for (uint256 i = 0; i < keycodes_.length; i++) {
+            Keycode keycode = keycodes_[i];
+            Module module = Module(getModuleForKeycode[keycode]);
+            getModuleForKeycode[keycode] = module;
+            allKeycodes.push(keycode);
+        }
+
+        for (uint256 j = 0; j < policies_.length; j++) {
+            Policy policy = policies_[j];
+            activePolicies.push(policy);
+            getPolicyIndex[policy] = activePolicies.length - 1;
+        }
+    }
+
 
     function _pruneFromDependents(Policy policy_) internal {
         Keycode[] memory dependencies = policy_.configureDependencies();

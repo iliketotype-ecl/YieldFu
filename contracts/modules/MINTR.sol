@@ -1,87 +1,172 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 pragma solidity 0.8.24;
 
-import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import "@openzeppelin/contracts/utils/Pausable.sol";
 import "../Kernel.sol";
-import "../YieldFu.sol"; // Import YieldFu token contract
+import "../YieldFu.sol";
+import "hardhat/console.sol"; // Keep this for logging
 
-/// @notice MINTR handles minting and burning of YieldFu tokens.
-contract MINTR is Module {
+contract MINTR is Module, Pausable {
     // =========  EVENTS ========= //
-
-    event Mint(address indexed policy_, address indexed to_, uint256 amount_);
-    event Burn(address indexed policy_, address indexed from_, uint256 amount_);
-    event IncreaseMintApproval(address indexed policy_, uint256 newAmount_);
-    event DecreaseMintApproval(address indexed policy_, uint256 newAmount_);
+    event Minted(address indexed to, uint256 amount);
+    event Burned(address indexed from, uint256 amount);
+    event MintCapChanged(uint256 newDailyMintCap);
+    event MintLimitChanged(address indexed minter, uint256 newLimit);
+    event MinterAdded(address indexed minter);
+    event MinterRemoved(address indexed minter);
+    event MinterCheck(address indexed minter, bool isMinter);
+    event MintAttempt(address indexed minter, address indexed to, uint256 amount, bool success);
+    event MintFunctionCalled(address caller, address to, uint256 amount);
+    event MinterAuthorizationAttempt(address caller, bool isRegisteredMinter);
 
     // ========= ERRORS ========= //
-
-    error MINTR_NotApproved();
-    error MINTR_ZeroAmount();
-    error MINTR_NotActive();
+    error MINTR_Unauthorized();
+    error MINTR_DailyCapExceeded();
+    error MINTR_MinterLimitExceeded();
+    error MINTR_InvalidMintCap();
+    error MINTR_InvalidMintLimit();
+    error MINTR_AlreadyMinter();
+    error MINTR_NotMinter();
 
     // =========  STATE ========= //
+    YieldFuToken public yieldFu;
+    uint256 public dailyMintCap;
+    uint256 public mintedToday;
+    uint256 public lastMintDay;
 
-    YieldFuToken public yieldFu;  // Reference to the YieldFu token
-    bool public active;     // Status of the module (active/inactive)
+    mapping(address => bool) public isMinter;
+    mapping(address => uint256) public minterLimits;
+    mapping(address => uint256) public minterMinted;
 
-    /// @notice Mapping of who is approved for minting.
-    mapping(address => uint256) public mintApproval;
-
-    address public constant BLACK_HOLE = 0x000000000000000000000000000000000000dEaD;
-
-    constructor(Kernel kernel_, YieldFuToken yieldFu_) Module(kernel_) {
+    constructor(Kernel kernel_, YieldFuToken yieldFu_, uint256 initialDailyMintCap_) Module(kernel_) {
         yieldFu = yieldFu_;
-        active = true;
-    }
-
-    modifier onlyWhileActive() {
-        if (!active) revert MINTR_NotActive();
-        _;
-    }
-
-    /// @notice Mint YieldFu tokens to an address.
-    function mint(address to_, uint256 amount_) external onlyWhileActive permissioned {
-        if (amount_ == 0) revert MINTR_ZeroAmount();
-        if (mintApproval[msg.sender] < amount_) revert MINTR_NotApproved();
-
-        mintApproval[msg.sender] -= amount_;
-        yieldFu.mint(to_, amount_); // Mint YieldFu tokens to the address
-        emit Mint(msg.sender, to_, amount_);
-    }
-
-
-    /// @notice Burn YieldFu tokens by sending them to a black hole address.
-    function burn(address from_, uint256 amount_) external onlyWhileActive permissioned {
-        if (amount_ == 0) revert MINTR_ZeroAmount();
-
-        yieldFu.transferFrom(from_, BLACK_HOLE, amount_); // Send tokens to burn address
-        emit Burn(msg.sender, from_, amount_);
-    }
-
-    /// @notice Increase mint approval for a specific policy.
-    function increaseMintApproval(address policy_, uint256 amount_) external onlyKernel {
-        mintApproval[policy_] += amount_;
-        emit IncreaseMintApproval(policy_, amount_);
-    }
-
-    /// @notice Decrease mint approval for a specific policy.
-    function decreaseMintApproval(address policy_, uint256 amount_) external onlyKernel {
-        mintApproval[policy_] -= amount_;
-        emit DecreaseMintApproval(policy_, amount_);
-    }
-
-    /// @notice Emergency shutdown of minting and burning.
-    function deactivate() external onlyKernel {
-        active = false;
-    }
-
-    /// @notice Re-activate minting and burning after shutdown.
-    function activate() external onlyKernel {
-        active = true;
+        dailyMintCap = initialDailyMintCap_;
+        lastMintDay = block.timestamp / 1 days;
     }
 
     function KEYCODE() public pure override returns (Keycode) {
-        return toKeycode("MINTR");  // Return the module keycode
+        return toKeycode("MINTR");
+    }
+
+    function VERSION() external pure override returns (uint8 major, uint8 minor) {
+        return (1, 2); // v1.2
+    }
+
+
+    function _checkMintLimits(uint256 amount) internal view {
+        if (mintedToday + amount > dailyMintCap) revert MINTR_DailyCapExceeded();
+        if (minterMinted[msg.sender] + amount > minterLimits[msg.sender]) revert MINTR_MinterLimitExceeded();
+    }
+
+    modifier onlyMinter() {
+            bool isAuthorized = isMinter[msg.sender];
+            console.log("MINTR: Checking minter authorization for", msg.sender);
+            console.log("MINTR: Is minter authorized?", isAuthorized);
+            emit MinterAuthorizationAttempt(msg.sender, isAuthorized);
+            emit MinterCheck(msg.sender, isAuthorized);
+            if (!kernel.modulePermissions(KEYCODE(), Policy(msg.sender), this.mint.selector)) {
+                revert MINTR_Unauthorized();
+            }
+            _;
+        }
+
+    function mint(address minter, address to, uint256 amount) external whenNotPaused {
+        console.log("MINTR: Mint function called by", msg.sender);
+        console.log("MINTR: Minter address:", minter);
+        console.log("MINTR: Minting", amount, "tokens for", to);
+        console.log("MINTR: Is caller authorized?", isMinter[msg.sender]);
+
+        if (!isMinter[msg.sender]) {
+            console.log("MINTR: Caller is not authorized");
+            revert MINTR_Unauthorized();
+        }
+
+        _updateDailyMint();
+        _checkMintLimits(msg.sender, amount);
+
+        // Direct call to mint function without try/catch
+        yieldFu.mint(to, amount);
+        console.log("MINTR: Minting successful");
+
+        mintedToday += amount;
+        minterMinted[msg.sender] += amount;
+        emit Minted(to, amount);
+        emit MintAttempt(msg.sender, to, amount, true); // Indicate success
+    }
+
+
+    function _checkMintLimits(address minter, uint256 amount) internal view {
+        if (mintedToday + amount > dailyMintCap) revert MINTR_DailyCapExceeded();
+        if (minterMinted[minter] + amount > minterLimits[minter]) revert MINTR_MinterLimitExceeded();
+    }
+
+
+    function burn(address from, uint256 amount) external whenNotPaused permissioned {
+        yieldFu.burnFrom(from, amount);
+        emit Burned(from, amount);
+    }
+
+    function addMinter(address _minter, uint256 _limit) external permissioned {
+        if (isMinter[_minter]) revert MINTR_AlreadyMinter();
+        isMinter[_minter] = true;  
+        minterLimits[_minter] = _limit; 
+        emit MinterAdded(_minter);
+        emit MintLimitChanged(_minter, _limit);
+    }
+
+    function removeMinter(address minter) external permissioned {
+        if (!isMinter[minter]) revert MINTR_NotMinter();
+        isMinter[minter] = false;
+        delete minterLimits[minter];
+        delete minterMinted[minter];
+        emit MinterRemoved(minter);
+    }
+
+    function changeMintLimit(address minter, uint256 newLimit) external permissioned {
+        if (!isMinter[minter]) revert MINTR_NotMinter();
+        if (newLimit == 0) revert MINTR_InvalidMintLimit();
+        minterLimits[minter] = newLimit;
+        emit MintLimitChanged(minter, newLimit);
+    }
+
+    function changeDailyMintCap(uint256 newCap) external permissioned {
+        if (newCap == 0) revert MINTR_InvalidMintCap();
+        dailyMintCap = newCap;
+        emit MintCapChanged(newCap);
+    }
+
+    function pauseMinting() external permissioned {
+        _pause();
+    }
+
+    function unpauseMinting() external permissioned {
+        _unpause();
+    }
+
+    function _updateDailyMint() internal {
+        uint256 currentDay = block.timestamp / 1 days;
+        if (currentDay > lastMintDay) {
+            mintedToday = 0;
+            lastMintDay = currentDay;
+        }
+    }
+
+    // View functions
+    function getMinterInfo(address minter) external view returns (
+        bool isActive,
+        uint256 mintLimit,
+        uint256 mintedAmount
+    ) {
+        return (isMinter[minter], minterLimits[minter], minterMinted[minter]);
+    }
+
+    function getDailyMintInfo() external view returns (
+        uint256 cap,
+        uint256 minted,
+        uint256 remaining
+    ) {
+        uint256 currentDay = block.timestamp / 1 days;
+        uint256 currentMinted = currentDay > lastMintDay ? 0 : mintedToday;
+        return (dailyMintCap, currentMinted, dailyMintCap - currentMinted);
     }
 }
