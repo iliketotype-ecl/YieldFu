@@ -6,10 +6,10 @@ import "../Kernel.sol";
 import "../YieldFu.sol";
 import "hardhat/console.sol"; // Keep this for logging 
 
-/// @notice DEBASE applies periodic debasement to the YieldFu token with adjustable rates.
+/// @notice DEBASE applies periodic debasement to the YieldFu token with adjustable rates using a rebasing mechanism.
 contract DEBASE is Module, Pausable {
     // =========  EVENTS ========= //
-    event Debase(uint256 amount);
+    event Debase(uint256 newIndex);
     event DebaseRateChanged(uint256 newRate);
     event DebaseIntervalChanged(uint256 newInterval);
     event MinDebaseThresholdChanged(uint256 newThreshold);
@@ -22,13 +22,14 @@ contract DEBASE is Module, Pausable {
     error DEBASE_InvalidInterval();
     error DEBASE_InvalidThreshold();
     error DEBASE_BelowMinThreshold();
-
-// =========  STATE ========= //
+    
+    // =========  STATE ========= //
     YieldFuToken public yieldFu;
     uint256 public debaseRate; // Debasement rate in basis points (1 bp = 0.01%)
     uint256 public debaseInterval; // Time interval for debasement
     uint256 public lastDebaseTime;
     uint256 public minDebaseThreshold; // Minimum token supply threshold for debasement
+    uint256 public debaseIndex; // Rebasing index, starts at 1e18 (100%)
 
     constructor(
         Kernel kernel_,
@@ -42,6 +43,7 @@ contract DEBASE is Module, Pausable {
         debaseInterval = initialDebaseInterval_;
         minDebaseThreshold = initialMinDebaseThreshold_;
         lastDebaseTime = block.timestamp;
+        debaseIndex = 1e18; // Start with 1:1 ratio
     }
 
     modifier onlyAfterInterval() {
@@ -56,25 +58,30 @@ contract DEBASE is Module, Pausable {
         _;
     }
 
-    /// @notice Debase the YieldFu token.
+    /// @notice Debase the YieldFu token using rebasing mechanism.
     function debase() external permissioned onlyAfterInterval whenNotPaused {
         console.log("DEBASE: Debase function called");
         uint256 totalSupply = yieldFu.totalSupply();
         console.log("DEBASE: Total supply", totalSupply);
         console.log("DEBASE: Min debase threshold", minDebaseThreshold);
+        
         if (totalSupply < minDebaseThreshold) {
             console.log("DEBASE: Supply below threshold");
             revert DEBASE_BelowMinThreshold();
         }
         
-        uint256 debaseAmount = (totalSupply * debaseRate) / 10000; // Convert basis points to percentage
-        console.log("DEBASE: Debase amount", debaseAmount);
-        yieldFu.burn(debaseAmount); // Burn the debase amount from the supply
+        uint256 newDebaseIndex = (yieldFu.debaseIndex() * (10000 - debaseRate)) / 10000;
+        console.log("DEBASE: New debase index", newDebaseIndex);
+        
+        // Call YieldFuToken to update the debase index
+        yieldFu.updateDebaseIndex(newDebaseIndex);
 
         lastDebaseTime = block.timestamp;
-        emit Debase(debaseAmount);
+        emit Debase(newDebaseIndex);
         console.log("DEBASE: Debase successful");
     }
+
+
 
 
     /// @notice Change the debasement rate.
@@ -116,15 +123,22 @@ contract DEBASE is Module, Pausable {
         uint256 currentInterval,
         uint256 lastDebase,
         uint256 nextDebase,
-        bool isPaused
+        bool isPaused,
+        uint256 currentIndex
     ) {
         return (
             debaseRate,
             debaseInterval,
             lastDebaseTime,
             lastDebaseTime + debaseInterval,
-            paused()
+            paused(),
+            debaseIndex
         );
+    }
+
+    /// @notice Calculate the effective balance after applying the debase index
+    function getEffectiveBalance(address account) public view returns (uint256) {
+        return (yieldFu.balanceOf(account) * debaseIndex) / 1e18;
     }
 
     function KEYCODE() public pure override returns (Keycode) {
@@ -132,6 +146,6 @@ contract DEBASE is Module, Pausable {
     }
 
     function VERSION() external pure override returns (uint8 major, uint8 minor) {
-        return (1, 1); // Updated to v1.1
+        return (1, 2); // Updated to v1.2 for rebasing implementation
     }
 }

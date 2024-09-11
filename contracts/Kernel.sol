@@ -2,6 +2,7 @@
 pragma solidity 0.8.24;
 
 import "@openzeppelin/contracts/access/extensions/AccessControlEnumerable.sol";
+import "hardhat/console.sol"; // Keep this for logging
 
 //============================================================================================//
 //                                        GLOBAL TYPES                                        //
@@ -58,6 +59,8 @@ function ensureValidKeycode(Keycode keycode_) pure {
         }
     }
 }
+
+
 
 //============================================================================================//
 //                                        COMPONENTS                                          //
@@ -208,17 +211,19 @@ contract Kernel is AccessControl {
     // Installation of modules
     function _installModule(Module newModule_) internal {
         Keycode keycode = newModule_.KEYCODE();
+        console.log("INSTALL: Keycode: ", string(abi.encodePacked(fromKeycode(keycode))));
+
         require(Keycode.unwrap(keycode) != bytes5(0), "Kernel: invalid keycode");
 
         if (address(getModuleForKeycode[keycode]) != address(0))
             revert Kernel_ModuleAlreadyInstalled(keycode);
 
-        getModuleForKeycode[keycode] = newModule_;
-        getKeycodeForModule[newModule_] = keycode;
-        allKeycodes.push(keycode);
+        getModuleForKeycode[keycode] = newModule_; // Store the module for the keycode
+        getKeycodeForModule[newModule_] = keycode; // Store the reverse mapping
 
-        newModule_.INIT();
+        newModule_.INIT(); // Call INIT on the new module
     }
+
 
     // Policy activation
     function _activatePolicy(Policy policy_) internal {
@@ -271,6 +276,7 @@ contract Kernel is AccessControl {
             }
         }
     }
+
 
     function _executeModuleFunction(address module_, bytes memory data_) internal {
         (bool success, bytes memory result) = module_.call(data_);
@@ -341,9 +347,51 @@ contract Kernel is AccessControl {
         bool granted
     ) external onlyExecutor {
         Keycode keycode = getKeycodeForModule[Module(module)];
+        require(Keycode.unwrap(keycode) != bytes5(0), "Invalid Keycode");
         modulePermissions[keycode][Policy(policy)][selector] = granted;
+
         emit PermissionsUpdated(keycode, Policy(policy), selector, granted);
     }
+
+function bytes4ToHex(bytes4 _bytes) internal pure returns (string memory) {
+    return string(abi.encodePacked(
+        "0x",
+        toHexDigit(uint8(_bytes[0] >> 4)),
+        toHexDigit(uint8(_bytes[0] & 0x0f)),
+        toHexDigit(uint8(_bytes[1] >> 4)),
+        toHexDigit(uint8(_bytes[1] & 0x0f)),
+        toHexDigit(uint8(_bytes[2] >> 4)),
+        toHexDigit(uint8(_bytes[2] & 0x0f)),
+        toHexDigit(uint8(_bytes[3] >> 4)),
+        toHexDigit(uint8(_bytes[3] & 0x0f))
+    ));
+}
+
+function bytes5ToHex(bytes5 _bytes) internal pure returns (string memory) {
+    return string(abi.encodePacked(
+        "0x",
+        toHexDigit(uint8(_bytes[0] >> 4)),
+        toHexDigit(uint8(_bytes[0] & 0x0f)),
+        toHexDigit(uint8(_bytes[1] >> 4)),
+        toHexDigit(uint8(_bytes[1] & 0x0f)),
+        toHexDigit(uint8(_bytes[2] >> 4)),
+        toHexDigit(uint8(_bytes[2] & 0x0f)),
+        toHexDigit(uint8(_bytes[3] >> 4)),
+        toHexDigit(uint8(_bytes[3] & 0x0f)),
+        toHexDigit(uint8(_bytes[4] >> 4)),
+        toHexDigit(uint8(_bytes[4] & 0x0f))
+    ));
+}
+
+function toHexDigit(uint8 d) internal pure returns (bytes1) {
+    if (0 <= d && d <= 9) {
+        return bytes1(uint8(bytes1("0")) + d);
+    } else if (10 <= uint8(d) && uint8(d) <= 15) {
+        return bytes1(uint8(bytes1("a")) + d - 10);
+    }
+    revert("Invalid hex digit");
+}
+
 
 
     function acceptMigration(Keycode[] memory keycodes_, Policy[] memory policies_) external {

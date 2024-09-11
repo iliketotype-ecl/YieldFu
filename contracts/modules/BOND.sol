@@ -103,7 +103,7 @@ contract BOND is Module, ReentrancyGuard, Pausable {
         if (bond.claimed) revert BOND_AlreadyClaimed();
 
         bond.claimed = true;
-        mintrModule.mint(address(this), msg.sender, bond.payout);
+        mintrModule.mint(msg.sender, bond.payout);
         emit BondClaimed(msg.sender, bond.payout);
     }
 

@@ -11,8 +11,12 @@ contract TokenPolicy is Policy {
     YieldFuToken public yieldFuToken;
     MINTR public mintrModule;
     DEBASE public debaseModule;
+    mapping(address => bool) public authorizedMinters;
+    
+    error TokenPolicy_NotAuthorized();
 
-    error Unauthorized();
+    event MinterAuthorized(address indexed minter);
+    event MinterDeauthorized(address indexed minter);
 
     constructor(Kernel kernel_, YieldFuToken yieldFuToken_) Policy(kernel_) {
         yieldFuToken = yieldFuToken_;
@@ -33,32 +37,55 @@ contract TokenPolicy is Policy {
         requests[2] = Permissions(toKeycode("DBASE"), debaseModule.debase.selector);
     }
 
-    // Mint function using centralized permission management
-    function mint(address to, uint256 amount) external {
-        console.log("TokenPolicy: Attempting to mint", amount, "tokens for", to);
-        console.log("TokenPolicy: Caller is", msg.sender);
 
-        // Check permissions through the Kernel
-        if (!kernel.modulePermissions(toKeycode("MINTR"), this, mintrModule.mint.selector)) {
-            console.log("TokenPolicy: Unauthorized call to mint");
-            revert Unauthorized();
-        }
+    // New function to authorize minters
+    function authorizeMinter(address minter) external onlyExecutor {
+        authorizedMinters[minter] = true;
+        emit MinterAuthorized(minter);
+    }
 
-        // If permission is granted, proceed with minting
-        mintrModule.mint(msg.sender, to, amount);
+    // New function to deauthorize minters
+    function deauthorizeMinter(address minter) external onlyExecutor {
+        authorizedMinters[minter] = false;
+        emit MinterDeauthorized(minter);
+    }
+
+    function changeDebaseRate(uint256 newRate) external {
+    // Assuming permission checks have been done via Kernel
+        debaseModule.changeDebaseRate(newRate);
+    }
+
+
+    // Mint function with user-level permission check
+
+    function mint(address to_, uint256 amount_) external {
+        console.log("TOKENPOLICY: Mint called by:");
+        console.logAddress(msg.sender);
+        console.log("TOKENPOLICY: Amount:");
+        console.logUint(amount_);
+        console.log("TOKENPOLICY: To:");
+        console.logAddress(to_);
+        
+        console.log("TOKENPOLICY: Checking if caller is authorized to mint");
+        bool isAuthorized = isAuthorizedMinter(msg.sender);
+        console.logBool(isAuthorized);
+        
+        if (!isAuthorized) revert TokenPolicy_NotAuthorized();
+        console.log("TOKENPOLICY: Authorized minter");
+        
+        console.log("TOKENPOLICY: Calling MINTR mint");
+        MINTR(getModuleAddress(toKeycode("MINTR"))).mint(to_, amount_);
     }
 
     // Burn function using centralized permission management
     function burn(address from, uint256 amount) external {
         console.log("TokenPolicy: Attempting to burn", amount, "tokens from", from);
 
-        // Check permissions through the Kernel
         if (!kernel.modulePermissions(toKeycode("MINTR"), this, mintrModule.burn.selector)) {
             console.log("TokenPolicy: Unauthorized call to burn");
-            revert Unauthorized();
+            revert TokenPolicy_NotAuthorized();
         }
 
-        // If permission is granted, proceed with burning
         mintrModule.burn(from, amount);
     }
 
@@ -66,13 +93,22 @@ contract TokenPolicy is Policy {
     function debase() external {
         console.log("TokenPolicy: Attempting to debase");
 
-        // Check permissions through the Kernel
         if (!kernel.modulePermissions(toKeycode("DBASE"), this, debaseModule.debase.selector)) {
             console.log("TokenPolicy: Unauthorized call to debase");
-            revert Unauthorized();
+            revert TokenPolicy_NotAuthorized();
         }
 
-        // If permission is granted, proceed with debasing
         debaseModule.debase();
+    }
+
+    // Helper function to check if an address is an authorized minter
+    function isAuthorizedMinter(address minter) public view returns (bool) {
+        return authorizedMinters[minter];
+    }
+
+    // Only allow the Kernel's executor to call certain functions
+    modifier onlyExecutor() {
+        require(msg.sender == kernel.executor(), "TokenPolicy: caller is not the executor");
+        _;
     }
 }
