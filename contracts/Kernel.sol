@@ -267,8 +267,16 @@ contract Kernel is AccessControl {
         uint256 reqLength = requests_.length;
         for (uint256 i = 0; i < reqLength; ) {
             Permissions memory request = requests_[i];
+            
+            // Add logging here to track permission granting
+            console.log("KERNEL: Granting permission for policy:", address(policy_));
+            console.log("KERNEL: Module Keycode:", string(abi.encodePacked(fromKeycode(request.keycode))));
+            console.log("KERNEL: Function selector:", bytes4ToHex(request.funcSelector));
+            console.log("KERNEL: Granting:", grant_);
+            
+            // Update the permission mapping
             modulePermissions[request.keycode][policy_][request.funcSelector] = grant_;
-
+            
             emit PermissionsUpdated(request.keycode, policy_, request.funcSelector, grant_);
 
             unchecked {
@@ -276,6 +284,7 @@ contract Kernel is AccessControl {
             }
         }
     }
+
 
 
     function _executeModuleFunction(address module_, bytes memory data_) internal {

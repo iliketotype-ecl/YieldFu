@@ -1,19 +1,15 @@
 import { expect } from "chai";
-import pkg from "hardhat";
-const { ethers } = pkg;
+import { deployContracts } from "../setup/deployContracts.test.js";
 
-describe("TokenPolicy", function () {
-  let Kernel,
-    kernel,
-    YieldFuToken,
+describe("Minting Tests", function () {
+  let kernel,
     yieldFuToken,
-    MINTR,
     mintrModule,
-    DEBASE,
     debaseModule,
-    TokenPolicy,
-    tokenPolicy;
-  let owner, addr1, addr2;
+    tokenPolicy,
+    owner,
+    addr1,
+    addr2;
 
   const initialSupply = ethers.parseEther("1000000");
   const dailyMintCap = ethers.parseEther("100000");
@@ -22,111 +18,25 @@ describe("TokenPolicy", function () {
   const minDebaseThreshold = ethers.parseEther("500000");
 
   beforeEach(async function () {
-    [owner, addr1, addr2] = await ethers.getSigners();
-
-    // Deploy the Kernel contract
-    const Kernel = await ethers.getContractFactory("Kernel");
-    kernel = await Kernel.deploy();
-    await kernel.waitForDeployment();
-    console.log("TEST: Kernel deployed at:", await kernel.getAddress());
-
-    // Deploy the YieldFuToken
-    const YieldFuToken = await ethers.getContractFactory("YieldFuToken");
-    yieldFuToken = await YieldFuToken.deploy(
-      "YieldFu",
-      "YFU",
+    const deployedContracts = await deployContracts({
       initialSupply,
-      owner.address
-    );
-    await yieldFuToken.waitForDeployment();
-
-    // Deploy the MINTR module
-    const MINTR = await ethers.getContractFactory("MINTR");
-    mintrModule = await MINTR.deploy(
-      await kernel.getAddress(),
-      await yieldFuToken.getAddress(),
-      dailyMintCap
-    );
-    await mintrModule.waitForDeployment();
-    console.log(
-      "TEST: MINTR module deployed at:",
-      await mintrModule.getAddress()
-    );
-
-    // Deploy the DEBASE module
-    const DEBASE = await ethers.getContractFactory("DEBASE");
-    debaseModule = await DEBASE.deploy(
-      await kernel.getAddress(),
-      await yieldFuToken.getAddress(),
+      dailyMintCap,
       debaseRate,
       debaseInterval,
-      minDebaseThreshold
-    );
-    await debaseModule.waitForDeployment();
-    console.log(
-      "TEST: DEBASE module deployed at:",
-      await debaseModule.getAddress()
-    );
+      minDebaseThreshold,
+    });
 
-    // Install the modules in Kernel
-    await kernel.executeAction(0, await mintrModule.getAddress(), "0x");
-    await kernel.executeAction(0, await debaseModule.getAddress(), "0x");
-    console.log("TEST: Modules installed in Kernel");
-
-    // Deploy and Activate TokenPolicy
-    TokenPolicy = await ethers.getContractFactory("TokenPolicy");
-    tokenPolicy = await TokenPolicy.deploy(
-      await kernel.getAddress(),
-      await yieldFuToken.getAddress()
-    );
-    await tokenPolicy.waitForDeployment();
-    console.log(
-      "TEST: TokenPolicy deployed at:",
-      await tokenPolicy.getAddress()
-    );
-    await kernel
-      .connect(owner)
-      .executeAction(2, await tokenPolicy.getAddress(), "0x");
-    console.log("TEST: TokenPolicy activated in Kernel");
-
-    // Grant permission to TokenPolicy to set policy limit in MINTR
-    const setPolicyLimitSelector =
-      mintrModule.interface.getFunction("setPolicyLimit").selector;
-    await kernel.setModulePermission(
-      await mintrModule.getAddress(),
-      await tokenPolicy.getAddress(),
-      setPolicyLimitSelector,
-      true
-    );
-    console.log("TEST: Permission granted for setting policy limit");
-
-    // Grant permission for minting via the TOKEN module
-    const mintSelector = yieldFuToken.interface.getFunction("mint").selector;
-    await kernel.setModulePermission(
-      await mintrModule.getAddress(),
-      await tokenPolicy.getAddress(),
-      mintSelector,
-      true
-    );
-
-    // Grant permission to owner to call setPolicyLimit in MINTR
-    await kernel.setModulePermission(
-      await mintrModule.getAddress(),
-      owner.address,
-      setPolicyLimitSelector,
-      true
-    );
-    console.log("TEST: Permission granted to owner for setting policy limit");
-
-    // Set policy mint limit with correct signer
-    await mintrModule
-      .connect(owner)
-      .setPolicyLimit(
-        await tokenPolicy.getAddress(),
-        ethers.parseEther("1000")
-      );
+    ({
+      kernel,
+      yieldFuToken,
+      mintrModule,
+      debaseModule,
+      tokenPolicy,
+      owner,
+      addr1,
+      addr2,
+    } = deployedContracts);
   });
-
   it("should allow authorized minters to mint tokens", async function () {
     // Authorize addr1 as a minter
     await tokenPolicy.authorizeMinter(addr1.address);

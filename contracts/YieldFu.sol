@@ -83,6 +83,8 @@ contract YieldFuToken is ERC20, ERC20Burnable, ERC20Permit, Pausable {
         return (rawSupply * debaseIndex) / 1e18; // Adjust for debase index
     }
 
+
+
     // =========  PAUSING ========= //
 
     /// @notice Pause token transfers
@@ -104,7 +106,14 @@ contract YieldFuToken is ERC20, ERC20Burnable, ERC20Permit, Pausable {
         return super.transfer(to, amount);
     }
 
-    function transferFrom(address from, address to, uint256 amount) public override whenNotPaused returns (bool) {
+      function transferFrom(address from, address to, uint256 amount) public override returns (bool) {
+        console.log("YIELDFU: TransferFrom called by:", msg.sender);  // Log who is calling transferFrom
+        console.log("YIELDFU: Transfer from:", from);
+        console.log("YIELDFU: Transfer to:", to);
+        console.log("YIELDFU: Amount to transfer:", amount);
+        console.log("YIELDFU: Allowance available for transfer:", allowance(from, msg.sender));
+
         return super.transferFrom(from, to, amount);
     }
+
 }

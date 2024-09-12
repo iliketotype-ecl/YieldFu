@@ -5,6 +5,7 @@ import "@openzeppelin/contracts/utils/Pausable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "../Kernel.sol";
 import "../YieldFu.sol";
+import "./MINTR.sol";
 
 contract STAKE is Module, Pausable, ReentrancyGuard {
     // =========  EVENTS ========= //
@@ -28,18 +29,23 @@ contract STAKE is Module, Pausable, ReentrancyGuard {
 
     // =========  STATE ========= //
     YieldFuToken public token;
+    MINTR public mintrModule;
     uint256 public baseAPY;
     uint256 public boostedAPY;
     uint256 public boostEndTime;
     uint256 public cooldownPeriod;
-    uint256 public earlyUnstakeSlashRate; // In basis points (e.g., 500 = 5%)
+    uint256 public earlyUnstakeSlashRate;
     uint256 public maxStakeCap;
     uint256 public totalStaked;
+    uint256 public rewardRate;
+    uint256 public lastUpdateTime;
+    uint256 public rewardPerTokenStored;
 
     struct StakeInfo {
         uint256 amount;
-        uint256 lastUpdateTime;
         uint256 lastStakeTime;
+        uint256 userRewardPerTokenPaid;
+        uint256 rewards;
     }
 
     mapping(address => StakeInfo) public stakes;
@@ -59,6 +65,8 @@ contract STAKE is Module, Pausable, ReentrancyGuard {
         cooldownPeriod = initialCooldown_;
         earlyUnstakeSlashRate = initialSlashRate_;
         maxStakeCap = initialMaxStakeCap_;
+        lastUpdateTime = block.timestamp;
+        rewardRate = baseAPY * 1e18 / (365 days * 100);
     }
 
     function KEYCODE() public pure override returns (Keycode) {
@@ -66,33 +74,59 @@ contract STAKE is Module, Pausable, ReentrancyGuard {
     }
 
     function VERSION() external pure override returns (uint8 major, uint8 minor) {
-        return (1, 1); // v1.1
+        return (1, 2); // v1.2
     }
 
     function INIT() external override onlyKernel {
         // Initialization logic, if any
     }
 
-    function stake(uint256 amount) external nonReentrant whenNotPaused permissioned {
+    modifier updateReward(address account) {
+        rewardPerTokenStored = rewardPerToken();
+        lastUpdateTime = block.timestamp;
+        if (account != address(0)) {
+            stakes[account].rewards = earned(account);
+            stakes[account].userRewardPerTokenPaid = rewardPerTokenStored;
+        }
+        _;
+    }
+
+    function rewardPerToken() public view returns (uint256) {
+        if (totalStaked == 0) {
+            return rewardPerTokenStored;
+        }
+        uint256 timeElapsed = block.timestamp - lastUpdateTime;
+        uint256 newRewardPerToken = rewardPerTokenStored + (
+            timeElapsed * rewardRate * 1e18 / totalStaked
+        );
+        return newRewardPerToken;
+    }
+
+    function earned(address account) public view returns (uint256) {
+        uint256 rewardPerTokenDelta = rewardPerToken() - stakes[account].userRewardPerTokenPaid;
+        uint256 newReward = (stakes[account].amount * rewardPerTokenDelta / 1e18);
+        uint256 totalReward = newReward + stakes[account].rewards;
+        console.log("STAKE: Total reward for", account, "is", totalReward);
+        return totalReward;
+    }
+
+    function stake(address from, uint256 amount) external nonReentrant whenNotPaused permissioned updateReward(from) {
         if (amount == 0) revert STAKE_ZeroAmount();
         if (totalStaked + amount > maxStakeCap) revert STAKE_MaxStakeCapExceeded();
 
-        updateReward(msg.sender);
-        stakes[msg.sender].amount += amount;
-        stakes[msg.sender].lastStakeTime = block.timestamp;
+        stakes[from].amount += amount;
+        stakes[from].lastStakeTime = block.timestamp;
         totalStaked += amount;
 
-        token.transferFrom(msg.sender, address(this), amount);
-        emit Stake(msg.sender, amount);
+        token.transferFrom(from, address(this), amount);
+        emit Stake(from, amount);
     }
 
-    function unstake(uint256 amount) external nonReentrant whenNotPaused permissioned {
-        StakeInfo storage userStake = stakes[msg.sender];
+    function unstake(address from, uint256 amount) external nonReentrant whenNotPaused permissioned updateReward(from) {
+        StakeInfo storage userStake = stakes[from];
         if (amount == 0) revert STAKE_ZeroAmount();
         if (userStake.amount < amount) revert STAKE_InsufficientBalance();
 
-        updateReward(msg.sender);
-        
         uint256 slashAmount = 0;
         if (block.timestamp < userStake.lastStakeTime + cooldownPeriod) {
             slashAmount = (amount * earlyUnstakeSlashRate) / 10000;
@@ -102,45 +136,48 @@ contract STAKE is Module, Pausable, ReentrancyGuard {
         totalStaked -= amount;
 
         uint256 transferAmount = amount - slashAmount;
-        token.transfer(msg.sender, transferAmount);
+        token.transfer(from, transferAmount);
         if (slashAmount > 0) {
             token.burn(slashAmount);
         }
 
-        emit Unstake(msg.sender, amount);
+        emit Unstake(from, amount);
     }
 
-    function getReward() external nonReentrant whenNotPaused permissioned {
-        updateReward(msg.sender);
-        uint256 reward = stakes[msg.sender].lastUpdateTime;
+    // Claim reward and mint the corresponding tokens via MINTR module
+    function getReward() external nonReentrant whenNotPaused permissioned updateReward(msg.sender) {
+        
+        uint256 reward = stakes[msg.sender].rewards;
+        console.log("MINTR: Minting reward of", reward, "to", msg.sender);
+
         if (reward > 0) {
-            stakes[msg.sender].lastUpdateTime = 0;
-            token.transfer(msg.sender, reward);
+            // Reset the rewards before minting
+            stakes[msg.sender].rewards = 0;
+
+            // Use the MINTR module to mint the reward to the user
+            mintrModule.mint(msg.sender, reward);
+
             emit RewardPaid(msg.sender, reward);
         }
     }
 
-    function updateReward(address account) internal {
-        StakeInfo storage userStake = stakes[account];
-        uint256 timeElapsed = block.timestamp - userStake.lastUpdateTime;
-        uint256 reward = (userStake.amount * getCurrentAPY() * timeElapsed) / (365 days * 10000);
-        userStake.lastUpdateTime = block.timestamp;
-        userStake.lastUpdateTime += reward;
-    }
+
 
     function getCurrentAPY() public view returns (uint256) {
         return block.timestamp < boostEndTime ? boostedAPY : baseAPY;
     }
 
-    function setAPY(uint256 newBaseAPY, uint256 newBoostedAPY) external permissioned {
-        if (newBaseAPY > 10000 || newBoostedAPY > 10000) revert STAKE_InvalidAPY(); // Max 100% APY
+    function setAPY(uint256 newBaseAPY, uint256 newBoostedAPY) external permissioned updateReward(address(0)) {
+        if (newBaseAPY > 10000 || newBoostedAPY > 10000) revert STAKE_InvalidAPY();
         baseAPY = newBaseAPY;
         boostedAPY = newBoostedAPY;
+        rewardRate = getCurrentAPY() * 1e18 / (365 days * 1e4);
         emit APYChanged(newBaseAPY, newBoostedAPY);
     }
 
-    function boostAPY(uint256 duration) external permissioned {
+    function boostAPY(uint256 duration) external permissioned updateReward(address(0)) {
         boostEndTime = block.timestamp + duration;
+        rewardRate = getCurrentAPY() * 1e18 / (365 days * 100);
         emit APYBoosted(boostEndTime);
     }
 
@@ -161,7 +198,6 @@ contract STAKE is Module, Pausable, ReentrancyGuard {
         emit MaxStakeCapSet(newMaxStakeCap);
     }
 
-    // View functions
     function getStakeInfo(address user) external view returns (
         uint256 stakedAmount,
         uint256 pendingRewards,
@@ -169,12 +205,10 @@ contract STAKE is Module, Pausable, ReentrancyGuard {
         bool inCooldown
     ) {
         StakeInfo memory userStake = stakes[user];
-        uint256 timeElapsed = block.timestamp - userStake.lastUpdateTime;
-        uint256 reward = (userStake.amount * getCurrentAPY() * timeElapsed) / (365 days * 10000);
-        
+        uint256 pendingReward = earned(user);
         return (
             userStake.amount,
-            userStake.lastUpdateTime + reward,
+            pendingReward,
             userStake.lastStakeTime,
             block.timestamp < userStake.lastStakeTime + cooldownPeriod
         );
